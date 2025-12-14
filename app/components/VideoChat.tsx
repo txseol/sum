@@ -16,12 +16,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { getWebSocketUrl } from "../utils/websocket";
 
-interface PeerConnection {
-  peerId: string;
-  connection: RTCPeerConnection;
-  stream?: MediaStream;
-}
-
 interface VideoChatProps {
   isOpen: boolean;
   onClose: () => void;
@@ -46,15 +40,18 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const localStreamRef = useRef<MediaStream | null>(null); // 스트림을 ref로도 관리
+  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(new Map()); // 대기 중인 ICE candidates
   const clientIdRef = useRef<string>(
     Math.random().toString(36).substring(2, 11)
   );
 
-  // ICE 서버 설정 (STUN 서버)
+  // ICE 서버 설정 (STUN/TURN 서버)
   const iceServers: RTCConfiguration = {
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
     ],
   };
 
@@ -68,6 +65,7 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
         audio: true,
       });
       setLocalStream(stream);
+      localStreamRef.current = stream; // ref에도 저장
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
@@ -84,16 +82,27 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
    */
   const createPeerConnection = useCallback(
     (peerId: string, stream: MediaStream): RTCPeerConnection => {
+      console.log(`[WebRTC] PeerConnection 생성: ${peerId}`);
+      
+      // 이미 존재하면 기존 것 반환
+      const existingPc = peerConnectionsRef.current.get(peerId);
+      if (existingPc) {
+        console.log(`[WebRTC] 기존 PeerConnection 사용: ${peerId}`);
+        return existingPc;
+      }
+
       const pc = new RTCPeerConnection(iceServers);
 
       // 로컬 스트림의 트랙을 추가
       stream.getTracks().forEach((track) => {
+        console.log(`[WebRTC] 트랙 추가: ${track.kind}`);
         pc.addTrack(track, stream);
       });
 
       // ICE candidate 이벤트
       pc.onicecandidate = (event) => {
         if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+          console.log(`[WebRTC] ICE candidate 전송 -> ${peerId}`);
           wsRef.current.send(
             JSON.stringify({
               type: "ice-candidate",
@@ -105,22 +114,30 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
         }
       };
 
+      // ICE 연결 상태 변경
+      pc.oniceconnectionstatechange = () => {
+        console.log(`[WebRTC] ICE 연결 상태 (${peerId}):`, pc.iceConnectionState);
+      };
+
       // 원격 스트림 수신
       pc.ontrack = (event) => {
-        console.log("원격 스트림 수신:", peerId);
-        setRemoteStreams((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(peerId, event.streams[0]);
-          return newMap;
-        });
+        console.log(`[WebRTC] 원격 스트림 수신: ${peerId}`, event.streams);
+        if (event.streams && event.streams[0]) {
+          setRemoteStreams((prev) => {
+            const newMap = new Map(prev);
+            newMap.set(peerId, event.streams[0]);
+            return newMap;
+          });
+        }
       };
 
       // 연결 상태 변경
       pc.onconnectionstatechange = () => {
-        console.log(`피어 ${peerId} 연결 상태:`, pc.connectionState);
+        console.log(`[WebRTC] 연결 상태 (${peerId}):`, pc.connectionState);
         if (
           pc.connectionState === "disconnected" ||
-          pc.connectionState === "failed"
+          pc.connectionState === "failed" ||
+          pc.connectionState === "closed"
         ) {
           // 연결 해제된 피어 정리
           setRemoteStreams((prev) => {
@@ -129,10 +146,24 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
             return newMap;
           });
           peerConnectionsRef.current.delete(peerId);
+          pendingCandidatesRef.current.delete(peerId);
         }
       };
 
       peerConnectionsRef.current.set(peerId, pc);
+      
+      // 대기 중인 ICE candidates 적용
+      const pendingCandidates = pendingCandidatesRef.current.get(peerId);
+      if (pendingCandidates && pendingCandidates.length > 0) {
+        console.log(`[WebRTC] 대기 중인 ICE candidates 적용: ${pendingCandidates.length}개`);
+        pendingCandidates.forEach(candidate => {
+          pc.addIceCandidate(candidate).catch(err => 
+            console.error("[WebRTC] ICE candidate 추가 실패:", err)
+          );
+        });
+        pendingCandidatesRef.current.delete(peerId);
+      }
+      
       return pc;
     },
     []
@@ -144,62 +175,96 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
   const handleWebSocketMessage = useCallback(
     async (event: MessageEvent) => {
       const data = JSON.parse(event.data);
+      
+      // 비디오 관련 메시지가 아니면 무시
+      if (!data.type?.startsWith("video-") && data.type !== "ice-candidate") {
+        return;
+      }
 
       // 자신의 메시지는 무시
-      if (data.clientId === clientIdRef.current) return;
+      if (data.clientId === clientIdRef.current) {
+        return;
+      }
+
+      console.log(`[WebRTC] 메시지 수신: ${data.type} from ${data.clientId}`);
+
+      const stream = localStreamRef.current;
 
       switch (data.type) {
         case "video-join": {
           // 새 피어가 참여함 - offer 전송
-          console.log("새 피어 참여:", data.clientId);
-          if (!localStream) return;
+          console.log("[WebRTC] 새 피어 참여, offer 전송:", data.clientId);
+          if (!stream) {
+            console.error("[WebRTC] 로컬 스트림 없음");
+            return;
+          }
 
-          const pc = createPeerConnection(data.clientId, localStream);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
+          const pc = createPeerConnection(data.clientId, stream);
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            console.log("[WebRTC] Offer 생성 완료");
 
-          wsRef.current?.send(
-            JSON.stringify({
-              type: "video-offer",
-              offer,
-              targetPeerId: data.clientId,
-              clientId: clientIdRef.current,
-            })
-          );
+            wsRef.current?.send(
+              JSON.stringify({
+                type: "video-offer",
+                offer: pc.localDescription,
+                targetPeerId: data.clientId,
+                clientId: clientIdRef.current,
+              })
+            );
+          } catch (err) {
+            console.error("[WebRTC] Offer 생성 실패:", err);
+          }
           break;
         }
 
         case "video-offer": {
           // offer 수신 - answer 전송
           if (data.targetPeerId !== clientIdRef.current) return;
-          console.log("Offer 수신:", data.clientId);
-          if (!localStream) return;
+          console.log("[WebRTC] Offer 수신, answer 전송:", data.clientId);
+          if (!stream) {
+            console.error("[WebRTC] 로컬 스트림 없음");
+            return;
+          }
 
-          const pc = createPeerConnection(data.clientId, localStream);
-          await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
+          const pc = createPeerConnection(data.clientId, stream);
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            console.log("[WebRTC] Answer 생성 완료");
 
-          wsRef.current?.send(
-            JSON.stringify({
-              type: "video-answer",
-              answer,
-              targetPeerId: data.clientId,
-              clientId: clientIdRef.current,
-            })
-          );
+            wsRef.current?.send(
+              JSON.stringify({
+                type: "video-answer",
+                answer: pc.localDescription,
+                targetPeerId: data.clientId,
+                clientId: clientIdRef.current,
+              })
+            );
+          } catch (err) {
+            console.error("[WebRTC] Answer 생성 실패:", err);
+          }
           break;
         }
 
         case "video-answer": {
           // answer 수신
           if (data.targetPeerId !== clientIdRef.current) return;
-          console.log("Answer 수신:", data.clientId);
+          console.log("[WebRTC] Answer 수신:", data.clientId);
           const pc = peerConnectionsRef.current.get(data.clientId);
           if (pc) {
-            await pc.setRemoteDescription(
-              new RTCSessionDescription(data.answer)
-            );
+            try {
+              await pc.setRemoteDescription(
+                new RTCSessionDescription(data.answer)
+              );
+              console.log("[WebRTC] RemoteDescription 설정 완료");
+            } catch (err) {
+              console.error("[WebRTC] RemoteDescription 설정 실패:", err);
+            }
+          } else {
+            console.error("[WebRTC] PeerConnection 없음:", data.clientId);
           }
           break;
         }
@@ -207,21 +272,35 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
         case "ice-candidate": {
           // ICE candidate 수신
           if (data.targetPeerId !== clientIdRef.current) return;
+          console.log("[WebRTC] ICE candidate 수신:", data.clientId);
+          
           const pc = peerConnectionsRef.current.get(data.clientId);
           if (pc && data.candidate) {
-            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              console.log("[WebRTC] ICE candidate 추가 완료");
+            } catch (err) {
+              console.error("[WebRTC] ICE candidate 추가 실패:", err);
+            }
+          } else if (data.candidate) {
+            // PeerConnection이 아직 없으면 대기열에 추가
+            console.log("[WebRTC] ICE candidate 대기열에 추가");
+            const pending = pendingCandidatesRef.current.get(data.clientId) || [];
+            pending.push(new RTCIceCandidate(data.candidate));
+            pendingCandidatesRef.current.set(data.clientId, pending);
           }
           break;
         }
 
         case "video-leave": {
           // 피어가 나감
-          console.log("피어 나감:", data.clientId);
+          console.log("[WebRTC] 피어 나감:", data.clientId);
           const pc = peerConnectionsRef.current.get(data.clientId);
           if (pc) {
             pc.close();
             peerConnectionsRef.current.delete(data.clientId);
           }
+          pendingCandidatesRef.current.delete(data.clientId);
           setRemoteStreams((prev) => {
             const newMap = new Map(prev);
             newMap.delete(data.clientId);
@@ -231,7 +310,7 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
         }
       }
     },
-    [localStream, createPeerConnection]
+    [createPeerConnection]
   );
 
   /**
@@ -248,11 +327,13 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
       }
 
       // WebSocket 연결 (HTTPS면 wss://, HTTP면 ws://)
-      const ws = new WebSocket(getWebSocketUrl());
+      const wsUrl = getWebSocketUrl();
+      console.log("[WebRTC] WebSocket 연결:", wsUrl);
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log("화상통화 WebSocket 연결됨");
+        console.log("[WebRTC] WebSocket 연결됨");
         setIsConnected(true);
         setIsLoading(false);
 
@@ -268,16 +349,16 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
       ws.onmessage = handleWebSocketMessage;
 
       ws.onerror = (error) => {
-        console.error("WebSocket 오류:", error);
+        console.error("[WebRTC] WebSocket 오류:", error);
         setIsLoading(false);
       };
 
       ws.onclose = () => {
-        console.log("화상통화 WebSocket 연결 해제");
+        console.log("[WebRTC] WebSocket 연결 해제");
         setIsConnected(false);
       };
     } catch (error) {
-      console.error("화상통화 시작 오류:", error);
+      console.error("[WebRTC] 화상통화 시작 오류:", error);
       setIsLoading(false);
     }
   };
@@ -299,10 +380,13 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
     // 모든 피어 연결 종료
     peerConnectionsRef.current.forEach((pc) => pc.close());
     peerConnectionsRef.current.clear();
+    pendingCandidatesRef.current.clear();
 
     // 로컬 스트림 정리
     localStream?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
     setLocalStream(null);
+    localStreamRef.current = null;
 
     // 원격 스트림 정리
     setRemoteStreams(new Map());

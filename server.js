@@ -50,6 +50,13 @@ const wss = new WebSocketServer({
 const documentSessions = new Map();
 
 /**
+ * 화상통화 클라이언트 관리
+ * key: clientId
+ * value: WebSocket
+ */
+const videoClients = new Map();
+
+/**
  * Delta를 텍스트에 적용하는 함수
  * @param {string} text - 원본 텍스트
  * @param {object} delta - { position, deleteCount, insertText }
@@ -141,6 +148,7 @@ wss.on("connection", (ws) => {
   // 이 클라이언트가 참여한 문서 ID (연결 해제 시 정리용)
   let currentDocumentId = null;
   let currentClientId = null;
+  let currentVideoClientId = null; // 화상통화용 클라이언트 ID
 
   /**
    * 메시지 수신 핸들러
@@ -157,6 +165,7 @@ wss.on("connection", (ws) => {
         fileId,
         newParent,
         newIndex,
+        targetPeerId,
       } = messageData;
 
       console.log(`📨 메시지 수신 [${type}]: 클라이언트=${clientId}`);
@@ -234,22 +243,38 @@ wss.on("connection", (ws) => {
 
         // WebRTC 시그널링 메시지 처리
         case "video-join":
-          // 화상통화 참여 - 다른 모든 클라이언트에게 알림
+          // 화상통화 참여 - 클라이언트 등록 및 다른 참여자에게 알림
           console.log(`📹 화상통화 참여: ${clientId}`);
-          broadcastToAll(messageData, clientId);
+          currentVideoClientId = clientId;
+          videoClients.set(clientId, ws);
+          // 다른 화상통화 참여자에게만 알림
+          broadcastToVideoClients(messageData, clientId);
+          console.log(`📹 현재 화상통화 참여자: ${videoClients.size}명`);
           break;
 
         case "video-leave":
-          // 화상통화 퇴장 - 다른 모든 클라이언트에게 알림
+          // 화상통화 퇴장
           console.log(`📹 화상통화 퇴장: ${clientId}`);
-          broadcastToAll(messageData, clientId);
+          videoClients.delete(clientId);
+          currentVideoClientId = null;
+          // 다른 화상통화 참여자에게 알림
+          broadcastToVideoClients(messageData, clientId);
+          console.log(`📹 남은 화상통화 참여자: ${videoClients.size}명`);
           break;
 
         case "video-offer":
         case "video-answer":
         case "ice-candidate":
-          // WebRTC 시그널링 메시지 - 모든 클라이언트에게 전달
-          broadcastToAll(messageData, null);
+          // WebRTC 시그널링 메시지 - 특정 피어에게만 전달
+          if (targetPeerId) {
+            const targetWs = videoClients.get(targetPeerId);
+            if (targetWs && targetWs.readyState === 1) {
+              console.log(`📹 시그널링 [${type}]: ${clientId} -> ${targetPeerId}`);
+              targetWs.send(JSON.stringify(messageData));
+            } else {
+              console.log(`⚠️ 대상 피어 없음: ${targetPeerId}`);
+            }
+          }
           break;
 
         default:
@@ -269,6 +294,17 @@ wss.on("connection", (ws) => {
     // 참여 중인 문서 세션에서 제거
     if (currentDocumentId && currentClientId) {
       handleLeave(currentDocumentId, currentClientId);
+    }
+
+    // 화상통화 세션에서 제거
+    if (currentVideoClientId) {
+      videoClients.delete(currentVideoClientId);
+      // 다른 참여자에게 퇴장 알림
+      broadcastToVideoClients({
+        type: "video-leave",
+        clientId: currentVideoClientId,
+      }, currentVideoClientId);
+      console.log(`📹 화상통화 연결 해제: ${currentVideoClientId}, 남은 참여자: ${videoClients.size}명`);
     }
   });
 
@@ -415,6 +451,28 @@ function broadcastToAll(messageData, excludeClientId = null) {
   });
 
   console.log(`📤 브로드캐스트: ${sentCount}개 클라이언트`);
+}
+
+/**
+ * 화상통화 참여자에게만 메시지 브로드캐스트
+ * @param {object} messageData - 전송할 메시지 데이터
+ * @param {string|null} excludeClientId - 제외할 클라이언트 ID (선택적)
+ */
+function broadcastToVideoClients(messageData, excludeClientId = null) {
+  const messageString = JSON.stringify(messageData);
+  let sentCount = 0;
+
+  videoClients.forEach((clientWs, clientId) => {
+    // 제외할 클라이언트 건너뛰기
+    if (clientId === excludeClientId) return;
+    
+    if (clientWs.readyState === 1) {
+      clientWs.send(messageString);
+      sentCount++;
+    }
+  });
+
+  console.log(`📹 화상통화 브로드캐스트: ${sentCount}명에게 전송`);
 }
 
 /**
