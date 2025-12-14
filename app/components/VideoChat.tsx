@@ -14,8 +14,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-
-const WS_PORT = 3001;
+import { getWebSocketUrl } from "../utils/websocket";
 
 interface PeerConnection {
   peerId: string;
@@ -248,8 +247,8 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
         return;
       }
 
-      // WebSocket 연결
-      const ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+      // WebSocket 연결 (HTTPS면 wss://, HTTP면 ws://)
+      const ws = new WebSocket(getWebSocketUrl());
       wsRef.current = ws;
 
       ws.onopen = () => {

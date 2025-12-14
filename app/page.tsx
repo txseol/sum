@@ -24,9 +24,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import { ExplorerFileData, ActiveDocument, WebSocketMessage } from "./types";
-
-// WebSocket 서버 포트 (고정값: 3001)
-const WS_PORT = 3001;
+import { getWebSocketUrl } from "./utils/websocket";
 
 /**
  * FileExplorer를 dynamic import로 로드 (SSR 비활성화)
@@ -91,8 +89,10 @@ export default function Home() {
    * WebSocket 연결 및 파일 목록 동기화
    */
   useEffect(() => {
-    // WebSocket 서버에 연결
-    ws.current = new WebSocket(`ws://localhost:${WS_PORT}`);
+    // WebSocket 서버에 연결 (HTTPS면 wss://, HTTP면 ws://)
+    const wsUrl = getWebSocketUrl();
+    console.log("WebSocket 연결 시도:", wsUrl);
+    ws.current = new WebSocket(wsUrl);
 
     ws.current.onopen = () => {
       console.log("✅ WebSocket 연결됨");

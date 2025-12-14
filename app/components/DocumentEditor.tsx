@@ -20,9 +20,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { WebSocketMessage, ActiveDocument, EditDelta } from "../types";
-
-// WebSocket 서버 포트 (고정값: 3001)
-const WS_PORT = 3001;
+import { getWebSocketUrl } from "../utils/websocket";
 
 interface DocumentEditorProps {
   document: ActiveDocument; // 현재 편집 중인 문서 정보
@@ -106,8 +104,8 @@ export default function DocumentEditor({
     setContent("");
     prevContent.current = "";
 
-    // WebSocket 서버에 연결 (포트 3001 고정)
-    ws.current = new WebSocket(`ws://localhost:${WS_PORT}`);
+    // WebSocket 서버에 연결 (HTTPS면 wss://, HTTP면 ws://)
+    ws.current = new WebSocket(getWebSocketUrl());
 
     // 연결 성공 시 join 메시지 및 sync 요청 전송
     ws.current.onopen = () => {
