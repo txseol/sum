@@ -6,16 +6,16 @@
  *
  * 주요 기능:
  * 1. 클라이언트 연결/해제 관리
- * 2. 문서별 메시지 브로드캐스트
+ * 2. 문서별 메시지 브로드캐스트 (문서를 열고 있는 클라이언트에게만)
  * 3. 문서 참여(join) 및 퇴장(leave) 메시지 처리
- * 4. 실시간 편집 내용 동기화
+ * 4. Delta 기반 편집 동기화 (변경 부분만 전송하여 패킷 절약)
  * 5. 파일/폴더 목록 메모리 저장 및 동기화 (추후 Redis로 변경 예정)
  * 6. 파일/폴더 이동 시 모든 클라이언트에 브로드캐스트
  *
  * 메시지 타입:
  * - join: 문서 편집 세션 참여
  * - leave: 문서 편집 세션 퇴장
- * - edit: 문서 내용 수정
+ * - edit: 문서 내용 수정 (delta 기반)
  * - sync: 문서 내용 동기화 요청/응답
  * - move: 파일/폴더 위치 이동
  * - fileList: 파일 목록 전송
@@ -37,11 +37,23 @@ const wss = new WebSocketServer({
 });
 
 /**
- * 문서별 클라이언트 관리
+ * 문서별 클라이언트 관리 (문서를 열고 있는 클라이언트만 저장)
  * key: documentId
- * value: Set of clientIds
+ * value: Map<clientId, WebSocket>
  */
 const documentSessions = new Map();
+
+/**
+ * Delta를 텍스트에 적용하는 함수
+ * @param {string} text - 원본 텍스트
+ * @param {object} delta - { position, deleteCount, insertText }
+ * @returns {string} - 변경된 텍스트
+ */
+function applyDelta(text, delta) {
+  const before = text.slice(0, delta.position);
+  const after = text.slice(delta.position + delta.deleteCount);
+  return before + delta.insertText + after;
+}
 
 /**
  * 파일/폴더 목록 메모리 저장소
@@ -135,6 +147,7 @@ wss.on("connection", (ws) => {
         documentId,
         clientId,
         content,
+        delta,
         fileId,
         newParent,
         newIndex,
@@ -145,8 +158,8 @@ wss.on("connection", (ws) => {
       // 메시지 타입별 처리
       switch (type) {
         case "join":
-          // 문서 세션 참여
-          handleJoin(documentId, clientId);
+          // 문서 세션 참여 (WebSocket 객체도 함께 저장)
+          handleJoin(documentId, clientId, ws);
           currentDocumentId = documentId;
           currentClientId = clientId;
           break;
@@ -154,24 +167,37 @@ wss.on("connection", (ws) => {
         case "leave":
           // 문서 세션 퇴장
           handleLeave(documentId, clientId);
+          currentDocumentId = null;
           break;
 
         case "edit":
-          // 문서 편집 - 같은 문서를 보는 모든 클라이언트에게 브로드캐스트
-          // 서버 메모리에 문서 내용 저장
-          if (documentId && content !== undefined) {
+          // 문서 편집 - Delta 기반 편집
+          // 서버 메모리에 delta 적용하여 저장
+          if (documentId && delta) {
             if (!documentContents[documentId]) {
               documentContents[documentId] = { content: "" };
             }
-            documentContents[documentId].content = content;
+            // Delta 적용하여 내용 업데이트
+            documentContents[documentId].content = applyDelta(
+              documentContents[documentId].content,
+              delta
+            );
+            console.log(
+              `✏️ Delta 적용: 문서=${documentId}, 위치=${delta.position}, 삭제=${delta.deleteCount}, 삽입길이=${delta.insertText.length}`
+            );
           }
-          broadcastToAll(messageData);
+          // 해당 문서를 열고 있는 클라이언트에게만 브로드캐스트 (전송자 제외)
+          broadcastToDocumentSession(documentId, messageData, clientId);
           break;
 
         case "sync":
           // 동기화 요청 - 서버에서 최신 내용 전송
           console.log(`🔄 동기화 요청: 문서=${documentId}`);
-          if (documentId && documentContents[documentId]) {
+          if (documentId) {
+            // 문서가 없으면 빈 내용으로 초기화
+            if (!documentContents[documentId]) {
+              documentContents[documentId] = { content: "" };
+            }
             ws.send(
               JSON.stringify({
                 type: "sync",
@@ -229,13 +255,13 @@ wss.on("connection", (ws) => {
 });
 
 /**
- * 문서 세션 참여 처리
+ * 문서 세션 참여 처리 (WebSocket 객체 저장)
  */
-function handleJoin(documentId, clientId) {
+function handleJoin(documentId, clientId, ws) {
   if (!documentSessions.has(documentId)) {
-    documentSessions.set(documentId, new Set());
+    documentSessions.set(documentId, new Map());
   }
-  documentSessions.get(documentId).add(clientId);
+  documentSessions.get(documentId).set(clientId, ws);
 
   const participantCount = documentSessions.get(documentId).size;
   console.log(
@@ -260,6 +286,37 @@ function handleLeave(documentId, clientId) {
       console.log(`🗑️ 빈 세션 제거: 문서=${documentId}`);
     }
   }
+}
+
+/**
+ * 해당 문서를 열고 있는 클라이언트에게만 브로드캐스트 (전송자 제외)
+ * @param {string} documentId - 문서 ID
+ * @param {object} messageData - 전송할 메시지
+ * @param {string} excludeClientId - 제외할 클라이언트 ID (전송자)
+ */
+function broadcastToDocumentSession(documentId, messageData, excludeClientId) {
+  if (!documentSessions.has(documentId)) {
+    console.log(`⚠️ 세션 없음: 문서=${documentId}`);
+    return;
+  }
+
+  const messageString = JSON.stringify(messageData);
+  const sessionClients = documentSessions.get(documentId);
+  let sentCount = 0;
+
+  sessionClients.forEach((clientWs, clientId) => {
+    // 전송자는 제외
+    if (clientId === excludeClientId) return;
+
+    if (clientWs.readyState === 1) {
+      clientWs.send(messageString);
+      sentCount++;
+    }
+  });
+
+  console.log(
+    `📤 문서 세션 브로드캐스트: 문서=${documentId}, ${sentCount}명에게 전송`
+  );
 }
 
 /**

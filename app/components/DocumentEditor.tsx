@@ -4,9 +4,10 @@
  * 주요 기능:
  * 1. WebSocket 연결을 통한 실시간 텍스트 동기화
  * 2. 서버에서 문서 내용 로드 (sync 메시지)
- * 3. 한글 IME 조합 처리 (compositionstart/compositionend)
- * 4. 문서 ID별로 독립적인 편집 세션 관리
- * 5. 문서 닫기 기능
+ * 3. Delta 기반 편집 - 변경된 부분만 전송하여 패킷 절약
+ * 4. 한글 IME 조합 처리 (compositionstart/compositionend)
+ * 5. 문서 ID별로 독립적인 편집 세션 관리
+ * 6. 문서를 열고 있는 클라이언트에게만 변경사항 전파
  *
  * Props:
  * - document: 현재 편집 중인 문서 정보 (id, name)
@@ -18,7 +19,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { WebSocketMessage, ActiveDocument } from "../types";
+import { WebSocketMessage, ActiveDocument, EditDelta } from "../types";
 
 // WebSocket 서버 포트 (고정값: 3001)
 const WS_PORT = 3001;
@@ -26,6 +27,49 @@ const WS_PORT = 3001;
 interface DocumentEditorProps {
   document: ActiveDocument; // 현재 편집 중인 문서 정보
   onClose: () => void; // 문서 닫기 핸들러
+}
+
+/**
+ * 두 문자열 사이의 차이를 계산하여 EditDelta 반환
+ * 최소한의 변경 정보만 추출하여 패킷 절약
+ */
+function calculateDelta(oldText: string, newText: string): EditDelta {
+  // 앞에서부터 같은 부분 찾기
+  let start = 0;
+  while (
+    start < oldText.length &&
+    start < newText.length &&
+    oldText[start] === newText[start]
+  ) {
+    start++;
+  }
+
+  // 뒤에서부터 같은 부분 찾기
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (
+    oldEnd > start &&
+    newEnd > start &&
+    oldText[oldEnd - 1] === newText[newEnd - 1]
+  ) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  return {
+    position: start,
+    deleteCount: oldEnd - start,
+    insertText: newText.slice(start, newEnd),
+  };
+}
+
+/**
+ * EditDelta를 적용하여 새 텍스트 생성
+ */
+function applyDelta(text: string, delta: EditDelta): string {
+  const before = text.slice(0, delta.position);
+  const after = text.slice(delta.position + delta.deleteCount);
+  return before + delta.insertText + after;
 }
 
 export default function DocumentEditor({
@@ -50,12 +94,17 @@ export default function DocumentEditor({
   // 한글 조합 타이머 참조
   const compositionTimer = useRef<NodeJS.Timeout | null>(null);
 
+  // 이전 내용 참조 (delta 계산용)
+  const prevContent = useRef<string>("");
+
   /**
    * WebSocket 연결 설정 및 메시지 핸들링
    * 문서가 변경될 때마다 새로운 연결을 설정합니다.
    */
   useEffect(() => {
     setIsLoading(true);
+    setContent("");
+    prevContent.current = "";
 
     // WebSocket 서버에 연결 (포트 3001 고정)
     ws.current = new WebSocket(`ws://localhost:${WS_PORT}`);
@@ -64,7 +113,7 @@ export default function DocumentEditor({
     ws.current.onopen = () => {
       console.log("WebSocket 연결됨 - 문서:", document.name);
 
-      // 문서 참여 메시지 전송
+      // 문서 참여 메시지 전송 (이 문서의 편집 세션에 참여)
       const joinMessage: WebSocketMessage = {
         type: "join",
         documentId: document.id,
@@ -72,7 +121,7 @@ export default function DocumentEditor({
       };
       ws.current?.send(JSON.stringify(joinMessage));
 
-      // 서버에 문서 내용 동기화 요청
+      // 서버에 문서 내용 동기화 요청 (최신 내용 로드)
       const syncMessage: WebSocketMessage = {
         type: "sync",
         documentId: document.id,
@@ -92,17 +141,22 @@ export default function DocumentEditor({
       if (data.type === "sync" && data.content !== undefined) {
         console.log("문서 내용 로드 완료:", document.name);
         setContent(data.content);
+        prevContent.current = data.content;
         setIsLoading(false);
         return;
       }
 
-      // edit 메시지 처리 - 다른 사용자의 편집 내용 반영
+      // edit 메시지 처리 - 다른 사용자의 편집 내용 반영 (delta 적용)
       if (
         data.type === "edit" &&
         data.clientId !== clientId.current &&
-        data.content !== undefined
+        data.delta
       ) {
-        setContent(data.content);
+        setContent((currentContent) => {
+          const newContent = applyDelta(currentContent, data.delta!);
+          prevContent.current = newContent;
+          return newContent;
+        });
       }
     };
 
@@ -111,9 +165,9 @@ export default function DocumentEditor({
       setIsLoading(false);
     };
 
-    // 컴포넌트 언마운트 시 정리
+    // 컴포넌트 언마운트 시 정리 (문서 닫기)
     return () => {
-      // leave 메시지 전송
+      // leave 메시지 전송 (문서 편집 세션에서 퇴장)
       if (ws.current && ws.current.readyState === WebSocket.OPEN) {
         const leaveMessage: WebSocketMessage = {
           type: "leave",
@@ -133,19 +187,30 @@ export default function DocumentEditor({
   }, [document.id, document.name]);
 
   /**
-   * WebSocket을 통해 메시지 전송
-   * @param value - 전송할 문서 내용
+   * WebSocket을 통해 델타 메시지 전송
+   * 전체 내용이 아닌 변경된 부분만 전송하여 패킷 절약
    */
-  const sendMessage = useCallback(
-    (value: string) => {
+  const sendDelta = useCallback(
+    (newContent: string) => {
       if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        // 이전 내용과 비교하여 delta 계산
+        const delta = calculateDelta(prevContent.current, newContent);
+
+        // 변경사항이 없으면 전송하지 않음
+        if (delta.deleteCount === 0 && delta.insertText === "") {
+          return;
+        }
+
         const message: WebSocketMessage = {
           type: "edit",
           documentId: document.id,
           clientId: clientId.current,
-          content: value,
+          delta,
         };
         ws.current.send(JSON.stringify(message));
+
+        // 이전 내용 업데이트
+        prevContent.current = newContent;
       }
     },
     [document.id]
@@ -153,7 +218,7 @@ export default function DocumentEditor({
 
   /**
    * 한글 IME 조합 완료 처리
-   * 조합이 끝났을 때 상태 업데이트 및 메시지 전송
+   * 조합이 끝났을 때 상태 업데이트 및 델타 전송
    */
   const completeComposition = useCallback(
     (value: string) => {
@@ -163,9 +228,9 @@ export default function DocumentEditor({
       }
       setIsComposing(false);
       setContent(value);
-      sendMessage(value);
+      sendDelta(value);
     },
-    [sendMessage]
+    [sendDelta]
   );
 
   /**
@@ -175,10 +240,8 @@ export default function DocumentEditor({
     e: React.CompositionEvent<HTMLTextAreaElement>
   ) => {
     if (e.type === "compositionstart") {
-      // 조합 시작
       setIsComposing(true);
     } else if (e.type === "compositionend") {
-      // 조합 종료 - 최종 값으로 업데이트
       const value = (e.target as HTMLTextAreaElement).value;
       completeComposition(value);
     }
@@ -199,13 +262,13 @@ export default function DocumentEditor({
       }
       compositionTimer.current = setTimeout(
         () => completeComposition(value),
-        200 // 200ms 딜레이
+        200
       );
       return;
     }
 
-    // 일반 입력은 즉시 전송
-    sendMessage(value);
+    // 일반 입력은 즉시 델타 전송
+    sendDelta(value);
   };
 
   return (
@@ -213,13 +276,10 @@ export default function DocumentEditor({
       {/* 문서 헤더 영역 */}
       <div className="flex items-center justify-between px-4 py-2 bg-gray-100 border-b">
         <div className="flex items-center gap-2">
-          {/* 문서 아이콘 */}
           <span className="text-blue-500">📄</span>
-          {/* 문서 이름 */}
           <span className="font-medium text-gray-700">{document.name}</span>
         </div>
 
-        {/* 닫기 버튼 */}
         <button
           onClick={onClose}
           className="px-2 py-1 text-gray-500 hover:text-gray-700 hover:bg-gray-200 rounded transition-colors"

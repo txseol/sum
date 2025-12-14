@@ -45,6 +45,38 @@ function buildTree(
 }
 
 /**
+ * 특정 폴더가 다른 폴더의 하위에 있는지 확인 (재귀)
+ * @param items 전체 아이템 목록
+ * @param parentFolderName 부모 폴더 이름 (드래그 중인 폴더)
+ * @param targetFolderName 대상 폴더 이름 (드롭 대상)
+ * @returns 대상이 부모의 하위 폴더이면 true
+ */
+function isDescendant(
+  items: ExplorerFileData[],
+  parentFolderName: string,
+  targetFolderName: string | null
+): boolean {
+  if (!targetFolderName) return false;
+
+  // 대상 폴더 찾기
+  const targetFolder = items.find(
+    (item) => item.type === 0 && item.name === targetFolderName
+  );
+  if (!targetFolder) return false;
+
+  // 대상 폴더의 부모가 드래그 중인 폴더면 하위 폴더
+  const targetParent = targetFolder.dirPosition[0];
+  if (targetParent === parentFolderName) return true;
+
+  // 재귀적으로 상위 확인
+  if (targetParent) {
+    return isDescendant(items, parentFolderName, targetParent);
+  }
+
+  return false;
+}
+
+/**
  * TreeItem 컴포넌트 - 트리 구조의 각 아이템 (재귀적)
  */
 function TreeItem({
@@ -155,8 +187,6 @@ function DraggableItem({
   return (
     <div
       ref={combinedRef}
-      {...listeners}
-      {...attributes}
       style={{
         transform: transform
           ? `translate(${transform.x}px, ${transform.y}px)`
@@ -165,7 +195,7 @@ function DraggableItem({
         paddingLeft: `${depth * 12}px`,
       }}
       className={`
-        flex items-center gap-1 px-2 py-1 rounded cursor-grab select-none
+        flex items-center gap-1 px-2 py-1 rounded select-none
         ${isDragging ? "opacity-50 bg-blue-600" : "hover:bg-gray-700"}
         ${
           isOver && item.type === 0 ? "bg-blue-500/30 ring-1 ring-blue-400" : ""
@@ -174,25 +204,32 @@ function DraggableItem({
         transition-colors duration-150
       `}
     >
-      {/* 폴더 토글 버튼 */}
+      {/* 폴더 토글 버튼 - 드래그 영역에서 제외 */}
       {item.type === 0 && (
         <button
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
           }}
-          className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-white"
+          className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-white hover:bg-gray-600 rounded"
         >
-          {hasChildren ? (isOpen ? "▼" : "▶") : ""}
+          {hasChildren ? (isOpen ? "▼" : "▶") : "•"}
         </button>
       )}
       {item.type === 1 && <span className="w-4" />}
 
-      {/* 아이콘 */}
-      <span className="text-sm">{getIcon()}</span>
+      {/* 드래그 핸들 영역 (아이콘 + 이름) */}
+      <div
+        {...listeners}
+        {...attributes}
+        className="flex items-center gap-1 flex-1 cursor-grab"
+      >
+        {/* 아이콘 */}
+        <span className="text-sm">{getIcon()}</span>
 
-      {/* 이름 */}
-      <span className="text-sm truncate">{item.name}</span>
+        {/* 이름 */}
+        <span className="text-sm truncate">{item.name}</span>
+      </div>
     </div>
   );
 }
@@ -237,25 +274,61 @@ function FileList({ datalist }: { datalist: ExplorerFileData[] }) {
   const rootItems = buildTree(datalist, null);
 
   return (
-    <div className="w-64 h-full bg-gray-800 p-2 overflow-y-auto">
+    <div className="w-64 h-full bg-gray-800 flex flex-col">
       {/* 탐색기 헤더 */}
-      <div className="text-white text-sm font-semibold mb-3 px-2 py-1 border-b border-gray-600">
+      <div className="text-white text-sm font-semibold px-4 py-2 border-b border-gray-600 shrink-0">
         📂 파일 탐색기
       </div>
 
-      {/* 루트 드롭 영역 */}
-      <DroppableRoot />
+      {/* 파일 트리 영역 */}
+      <div className="flex-1 p-2 overflow-y-auto">
+        {/* 트리 구조 렌더링 */}
+        {rootItems.map((item) => (
+          <TreeItem key={item.id} item={item} allItems={datalist} />
+        ))}
+      </div>
 
-      {/* 트리 구조 렌더링 */}
-      {rootItems.map((item) => (
-        <TreeItem key={item.id} item={item} allItems={datalist} />
-      ))}
+      {/* 하단 드롭 영역 - 최상위로 이동 */}
+      <DroppableBottomRoot />
     </div>
   );
 }
 
 /**
- * DroppableRoot 컴포넌트 - 최상위 드롭 영역
+ * DroppableBottomRoot 컴포넌트 - 하단 최상위 드롭 영역
+ * 파일/폴더를 여기에 드롭하면 최상위(root)로 이동
+ */
+function DroppableBottomRoot() {
+  const { setNodeRef, isOver } = useDroppable({
+    id: "root-folder-bottom",
+    data: { type: "folder", folderName: null, folderId: null },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`
+        shrink-0 min-h-16 p-3 border-t border-gray-700
+        flex items-center justify-center
+        transition-colors duration-200
+        ${
+          isOver
+            ? "bg-blue-500/30 border-blue-400 text-blue-300"
+            : "bg-gray-800/50 text-gray-500 hover:text-gray-400"
+        }
+      `}
+    >
+      {isOver ? (
+        <span className="text-sm font-medium">📥 최상위로 이동</span>
+      ) : (
+        <span className="text-xs">여기에 드롭하면 최상위로 이동</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * DroppableRoot 컴포넌트 - 최상위 드롭 영역 (상단)
  */
 function DroppableRoot() {
   const { setNodeRef, isOver } = useDroppable({
@@ -381,7 +454,7 @@ export default function FileExplorer({
       return;
     }
 
-    // 폴더에 드롭 - 파일/폴더 이동
+    // 폴더에 드롭 - 파일/폴더 이동 (상단 및 하단 드롭존 포함)
     const overData = over.data.current as
       | { type?: string; folderName?: string | null; folderId?: string | null }
       | undefined;
@@ -391,6 +464,17 @@ export default function FileExplorer({
       // 자기 자신 또는 자신의 자식 폴더로 이동 방지
       if (draggedItem.type === 0 && draggedItem.name === newParent) {
         console.log("자기 자신으로 이동 불가");
+        return;
+      }
+
+      // 하위 폴더로 이동 방지 (재귀적으로 확인)
+      if (
+        draggedItem.type === 0 &&
+        newParent &&
+        isDescendant(data, draggedItem.name, newParent)
+      ) {
+        console.log("하위 폴더로 이동 불가");
+        alert("하위 폴더로 이동할 수 없습니다.");
         return;
       }
 
