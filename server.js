@@ -11,6 +11,7 @@
  * 4. Delta 기반 편집 동기화 (변경 부분만 전송하여 패킷 절약)
  * 5. 파일/폴더 목록 메모리 저장 및 동기화 (추후 Redis로 변경 예정)
  * 6. 파일/폴더 이동 시 모든 클라이언트에 브로드캐스트
+ * 7. WebRTC 시그널링 (화상통화)
  *
  * 메시지 타입:
  * - join: 문서 편집 세션 참여
@@ -20,6 +21,11 @@
  * - move: 파일/폴더 위치 이동
  * - fileList: 파일 목록 전송
  * - requestFileList: 파일 목록 요청
+ * - video-join: 화상통화 참여
+ * - video-leave: 화상통화 퇴장
+ * - video-offer: WebRTC offer
+ * - video-answer: WebRTC answer
+ * - ice-candidate: ICE candidate
  *
  * 실행 방법:
  * node server.js
@@ -226,6 +232,26 @@ wss.on("connection", (ws) => {
           handleMove(fileId, newParent, newIndex, clientId);
           break;
 
+        // WebRTC 시그널링 메시지 처리
+        case "video-join":
+          // 화상통화 참여 - 다른 모든 클라이언트에게 알림
+          console.log(`📹 화상통화 참여: ${clientId}`);
+          broadcastToAll(messageData, clientId);
+          break;
+
+        case "video-leave":
+          // 화상통화 퇴장 - 다른 모든 클라이언트에게 알림
+          console.log(`📹 화상통화 퇴장: ${clientId}`);
+          broadcastToAll(messageData, clientId);
+          break;
+
+        case "video-offer":
+        case "video-answer":
+        case "ice-candidate":
+          // WebRTC 시그널링 메시지 - 모든 클라이언트에게 전달
+          broadcastToAll(messageData, null);
+          break;
+
         default:
           console.log(`⚠️ 알 수 없는 메시지 타입: ${type}`);
       }
@@ -374,8 +400,10 @@ function handleMove(fileId, newParent, newIndex, clientId) {
 
 /**
  * 모든 클라이언트에게 메시지 브로드캐스트
+ * @param {object} messageData - 전송할 메시지 데이터
+ * @param {string|null} excludeClientId - 제외할 클라이언트 ID (선택적)
  */
-function broadcastToAll(messageData) {
+function broadcastToAll(messageData, excludeClientId = null) {
   const messageString = JSON.stringify(messageData);
   let sentCount = 0;
 
@@ -405,4 +433,5 @@ console.log("  - sync          : 문서 동기화 요청");
 console.log("  - move          : 파일/폴더 위치 이동");
 console.log("  - requestFileList: 파일 목록 요청");
 console.log("  - fileList      : 파일 목록 전송");
+console.log("  - video-*       : WebRTC 화상통화 시그널링");
 console.log("");

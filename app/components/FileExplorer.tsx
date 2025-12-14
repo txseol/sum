@@ -29,6 +29,7 @@ import {
   DragStartEvent,
 } from "@dnd-kit/core";
 import { ExplorerFileData } from "../types";
+import VideoChat from "./VideoChat";
 
 /**
  * 트리 구조로 파일/폴더를 정렬하는 함수
@@ -269,27 +270,42 @@ function DroppableFolder({
 /**
  * FileList 컴포넌트 - 트리 구조 파일/폴더 목록
  */
-function FileList({ datalist }: { datalist: ExplorerFileData[] }) {
+function FileList({
+  datalist,
+  onVideoChat,
+}: {
+  datalist: ExplorerFileData[];
+  onVideoChat: () => void;
+}) {
   // 최상위 아이템들 (dirPosition[0] === null)
   const rootItems = buildTree(datalist, null);
 
   return (
     <div className="w-64 h-full bg-gray-800 flex flex-col">
-      {/* 탐색기 헤더 */}
-      <div className="text-white text-sm font-semibold px-4 py-2 border-b border-gray-600 shrink-0">
-        📂 파일 탐색기
+      {/* 탐색기 헤더 + 화상통화 버튼 */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-600 shrink-0">
+        <span className="text-white text-sm font-semibold">📂 파일 탐색기</span>
+        <button
+          onClick={onVideoChat}
+          className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+          title="화상통화 시작"
+        >
+          📹
+        </button>
       </div>
 
-      {/* 파일 트리 영역 */}
-      <div className="flex-1 p-2 overflow-y-auto">
+      {/* 파일 트리 영역 + 하단 드롭존 */}
+      <div className="flex-1 flex flex-col overflow-hidden">
         {/* 트리 구조 렌더링 */}
-        {rootItems.map((item) => (
-          <TreeItem key={item.id} item={item} allItems={datalist} />
-        ))}
-      </div>
+        <div className="flex-1 p-2 overflow-y-auto min-h-0">
+          {rootItems.map((item) => (
+            <TreeItem key={item.id} item={item} allItems={datalist} />
+          ))}
+        </div>
 
-      {/* 하단 드롭 영역 - 최상위로 이동 */}
-      <DroppableBottomRoot />
+        {/* 하단 드롭 영역 - 최상위로 이동 (트리 영역 내 하단) */}
+        <DroppableBottomRoot />
+      </div>
     </div>
   );
 }
@@ -308,20 +324,20 @@ function DroppableBottomRoot() {
     <div
       ref={setNodeRef}
       className={`
-        shrink-0 min-h-16 p-3 border-t border-gray-700
+        shrink-0 mx-2 mb-2 py-2 px-3 rounded
         flex items-center justify-center
-        transition-colors duration-200
+        transition-colors duration-200 border border-dashed
         ${
           isOver
             ? "bg-blue-500/30 border-blue-400 text-blue-300"
-            : "bg-gray-800/50 text-gray-500 hover:text-gray-400"
+            : "border-gray-600 text-gray-500 hover:border-gray-500 hover:text-gray-400"
         }
       `}
     >
       {isOver ? (
         <span className="text-sm font-medium">📥 최상위로 이동</span>
       ) : (
-        <span className="text-xs">여기에 드롭하면 최상위로 이동</span>
+        <span className="text-xs">📁 루트로 이동</span>
       )}
     </div>
   );
@@ -419,6 +435,8 @@ export default function FileExplorer({
 }: FileExplorerProps) {
   // 현재 드래그 중인 아이템
   const [activeItem, setActiveItem] = useState<ExplorerFileData | null>(null);
+  // 화상통화 모달 상태
+  const [isVideoChatOpen, setIsVideoChatOpen] = useState(false);
 
   /**
    * 드래그 시작 핸들러
@@ -491,19 +509,30 @@ export default function FileExplorer({
   };
 
   return (
-    <DndContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-      <div className="flex h-full">
-        {/* 좌측: 파일 목록 (트리 구조) */}
-        <FileList datalist={data} />
+    <>
+      <DndContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <div className="flex h-full">
+          {/* 좌측: 파일 목록 (트리 구조) */}
+          <FileList
+            datalist={data}
+            onVideoChat={() => setIsVideoChatOpen(true)}
+          />
 
-        {/* 우측: 작업 영역 */}
-        <WorkSpace>{children}</WorkSpace>
-      </div>
+          {/* 우측: 작업 영역 */}
+          <WorkSpace>{children}</WorkSpace>
+        </div>
 
-      {/* 드래그 오버레이 */}
-      <DragOverlay>
-        <DragOverlayContent item={activeItem} />
-      </DragOverlay>
-    </DndContext>
+        {/* 드래그 오버레이 */}
+        <DragOverlay>
+          <DragOverlayContent item={activeItem} />
+        </DragOverlay>
+      </DndContext>
+
+      {/* 화상통화 모달 */}
+      <VideoChat
+        isOpen={isVideoChatOpen}
+        onClose={() => setIsVideoChatOpen(false)}
+      />
+    </>
   );
 }
