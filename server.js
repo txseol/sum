@@ -269,7 +269,9 @@ wss.on("connection", (ws) => {
           if (targetPeerId) {
             const targetWs = videoClients.get(targetPeerId);
             if (targetWs && targetWs.readyState === 1) {
-              console.log(`📹 시그널링 [${type}]: ${clientId} -> ${targetPeerId}`);
+              console.log(
+                `📹 시그널링 [${type}]: ${clientId} -> ${targetPeerId}`
+              );
               targetWs.send(JSON.stringify(messageData));
             } else {
               console.log(`⚠️ 대상 피어 없음: ${targetPeerId}`);
@@ -300,11 +302,16 @@ wss.on("connection", (ws) => {
     if (currentVideoClientId) {
       videoClients.delete(currentVideoClientId);
       // 다른 참여자에게 퇴장 알림
-      broadcastToVideoClients({
-        type: "video-leave",
-        clientId: currentVideoClientId,
-      }, currentVideoClientId);
-      console.log(`📹 화상통화 연결 해제: ${currentVideoClientId}, 남은 참여자: ${videoClients.size}명`);
+      broadcastToVideoClients(
+        {
+          type: "video-leave",
+          clientId: currentVideoClientId,
+        },
+        currentVideoClientId
+      );
+      console.log(
+        `📹 화상통화 연결 해제: ${currentVideoClientId}, 남은 참여자: ${videoClients.size}명`
+      );
     }
   });
 
@@ -465,7 +472,7 @@ function broadcastToVideoClients(messageData, excludeClientId = null) {
   videoClients.forEach((clientWs, clientId) => {
     // 제외할 클라이언트 건너뛰기
     if (clientId === excludeClientId) return;
-    
+
     if (clientWs.readyState === 1) {
       clientWs.send(messageString);
       sentCount++;

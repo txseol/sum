@@ -41,7 +41,9 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null); // 스트림을 ref로도 관리
-  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(new Map()); // 대기 중인 ICE candidates
+  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidate[]>>(
+    new Map()
+  ); // 대기 중인 ICE candidates
   const clientIdRef = useRef<string>(
     Math.random().toString(36).substring(2, 11)
   );
@@ -83,7 +85,7 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
   const createPeerConnection = useCallback(
     (peerId: string, stream: MediaStream): RTCPeerConnection => {
       console.log(`[WebRTC] PeerConnection 생성: ${peerId}`);
-      
+
       // 이미 존재하면 기존 것 반환
       const existingPc = peerConnectionsRef.current.get(peerId);
       if (existingPc) {
@@ -116,7 +118,10 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
 
       // ICE 연결 상태 변경
       pc.oniceconnectionstatechange = () => {
-        console.log(`[WebRTC] ICE 연결 상태 (${peerId}):`, pc.iceConnectionState);
+        console.log(
+          `[WebRTC] ICE 연결 상태 (${peerId}):`,
+          pc.iceConnectionState
+        );
       };
 
       // 원격 스트림 수신
@@ -151,19 +156,21 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
       };
 
       peerConnectionsRef.current.set(peerId, pc);
-      
+
       // 대기 중인 ICE candidates 적용
       const pendingCandidates = pendingCandidatesRef.current.get(peerId);
       if (pendingCandidates && pendingCandidates.length > 0) {
-        console.log(`[WebRTC] 대기 중인 ICE candidates 적용: ${pendingCandidates.length}개`);
-        pendingCandidates.forEach(candidate => {
-          pc.addIceCandidate(candidate).catch(err => 
+        console.log(
+          `[WebRTC] 대기 중인 ICE candidates 적용: ${pendingCandidates.length}개`
+        );
+        pendingCandidates.forEach((candidate) => {
+          pc.addIceCandidate(candidate).catch((err) =>
             console.error("[WebRTC] ICE candidate 추가 실패:", err)
           );
         });
         pendingCandidatesRef.current.delete(peerId);
       }
-      
+
       return pc;
     },
     []
@@ -175,7 +182,7 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
   const handleWebSocketMessage = useCallback(
     async (event: MessageEvent) => {
       const data = JSON.parse(event.data);
-      
+
       // 비디오 관련 메시지가 아니면 무시
       if (!data.type?.startsWith("video-") && data.type !== "ice-candidate") {
         return;
@@ -230,7 +237,9 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
 
           const pc = createPeerConnection(data.clientId, stream);
           try {
-            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(data.offer)
+            );
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             console.log("[WebRTC] Answer 생성 완료");
@@ -273,7 +282,7 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
           // ICE candidate 수신
           if (data.targetPeerId !== clientIdRef.current) return;
           console.log("[WebRTC] ICE candidate 수신:", data.clientId);
-          
+
           const pc = peerConnectionsRef.current.get(data.clientId);
           if (pc && data.candidate) {
             try {
@@ -285,7 +294,8 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
           } else if (data.candidate) {
             // PeerConnection이 아직 없으면 대기열에 추가
             console.log("[WebRTC] ICE candidate 대기열에 추가");
-            const pending = pendingCandidatesRef.current.get(data.clientId) || [];
+            const pending =
+              pendingCandidatesRef.current.get(data.clientId) || [];
             pending.push(new RTCIceCandidate(data.candidate));
             pendingCandidatesRef.current.set(data.clientId, pending);
           }
@@ -440,6 +450,14 @@ export default function VideoChat({ isOpen, onClose }: VideoChatProps) {
       endCall();
     }
   }, [isOpen, isConnected, endCall]);
+
+  // 로컬 비디오 요소에 스트림 연결 (video 요소가 렌더링된 후에도 작동)
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      console.log("[WebRTC] 로컬 비디오에 스트림 연결");
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, isConnected]);
 
   if (!isOpen) return null;
 
